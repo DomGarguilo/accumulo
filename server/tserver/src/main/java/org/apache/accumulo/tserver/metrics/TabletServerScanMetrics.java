@@ -18,34 +18,71 @@
  */
 package org.apache.accumulo.tserver.metrics;
 
+import java.time.Duration;
+
+import org.apache.accumulo.server.metrics.service.MicrometerMetricsFactory;
 import org.apache.hadoop.metrics2.lib.MetricsRegistry;
 import org.apache.hadoop.metrics2.lib.MutableStat;
 
+import io.micrometer.core.instrument.Timer;
+
 public class TabletServerScanMetrics extends TServerMetrics {
 
-  private final MutableStat scans;
-  private final MutableStat resultsPerScan;
-  private final MutableStat yields;
+  private final Timer scans;
+  private final Timer resultsPerScan;
+  private final Timer yields;
 
-  public TabletServerScanMetrics() {
+  TabletServerScanHadoopMetrics hadoopMetrics;
+
+  public TabletServerScanMetrics(MicrometerMetricsFactory micrometerMetrics) {
     super("Scans");
 
-    MetricsRegistry registry = super.getRegistry();
-    scans = registry.newStat("scan", "Scans", "Ops", "Count", true);
-    resultsPerScan = registry.newStat("result", "Results per scan", "Ops", "Count", true);
-    yields = registry.newStat("yield", "Yields", "Ops", "Count", true);
+    scans = Timer.builder("scans").description("Scans").register(micrometerMetrics.getRegistry());
+    resultsPerScan = Timer.builder("resultsPerScan").description("resultsPerScan")
+        .register(micrometerMetrics.getRegistry());
+    yields =
+        Timer.builder("yields").description("yields").register(micrometerMetrics.getRegistry());
+
+    hadoopMetrics = new TabletServerScanHadoopMetrics(super.getRegistry());
   }
 
   public void addScan(long value) {
-    scans.add(value);
+    scans.record(Duration.ofMillis(value));
+    hadoopMetrics.addScan(value);
   }
 
   public void addResult(long value) {
-    resultsPerScan.add(value);
+    resultsPerScan.record(Duration.ofMillis(value));
+    hadoopMetrics.addResult(value);
   }
 
   public void addYield(long value) {
-    yields.add(value);
+    yields.record(Duration.ofMillis(value));
+    hadoopMetrics.addYield(value);
   }
 
+  private static class TabletServerScanHadoopMetrics {
+
+    private final MutableStat scans;
+    private final MutableStat resultsPerScan;
+    private final MutableStat yields;
+
+    TabletServerScanHadoopMetrics(MetricsRegistry registry) {
+      scans = registry.newStat("scan", "Scans", "Ops", "Count", true);
+      resultsPerScan = registry.newStat("result", "Results per scan", "Ops", "Count", true);
+      yields = registry.newStat("yield", "Yields", "Ops", "Count", true);
+    }
+
+    public void addScan(long value) {
+      scans.add(value);
+    }
+
+    public void addResult(long value) {
+      resultsPerScan.add(value);
+    }
+
+    public void addYield(long value) {
+      yields.add(value);
+    }
+  }
 }

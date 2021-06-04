@@ -337,7 +337,7 @@ public class TabletServer extends AbstractServer {
     this.security = AuditedSecurityOperation.getInstance(context);
 
     updateMetrics = new TabletServerUpdateMetrics();
-    scanMetrics = new TabletServerScanMetrics();
+    scanMetrics = new TabletServerScanMetrics(getMicrometerMetrics());
     mincMetrics = new TabletServerMinCMetrics();
     ceMetrics = new CompactionExecutorsMetrics();
     ThreadPools.createGeneralScheduledExecutorService(aconf).scheduleWithFixedDelay(

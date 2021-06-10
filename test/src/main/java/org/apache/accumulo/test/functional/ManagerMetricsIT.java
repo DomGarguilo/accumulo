@@ -18,16 +18,27 @@
  */
 package org.apache.accumulo.test.functional;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Scanner;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.accumulo.core.client.Accumulo;
 import org.apache.accumulo.core.client.AccumuloClient;
@@ -67,8 +78,13 @@ public class ManagerMetricsIT extends AccumuloClusterHarness {
 
   private long maxWait;
 
-  private static final Set<String> REQUIRED_METRIC_KEYS =
+  private static final Set<String> REQUIRED_METRIC_KEYS_HADOOP =
       Set.of("currentFateOps", "totalFateOps", "totalZkConnErrors", "FateTxState_NEW",
+          "FateTxState_IN_PROGRESS", "FateTxState_FAILED_IN_PROGRESS", "FateTxState_FAILED",
+          "FateTxState_SUCCESSFUL", "FateTxState_UNKNOWN");
+
+  private static final Set<String> REQUIRED_METRIC_KEYS_MICROMETER =
+      Set.of("currentFateOps", "zkChildFateOpsTotal", "zkConnectionErrorsTotal", "FateTxState_NEW",
           "FateTxState_IN_PROGRESS", "FateTxState_FAILED_IN_PROGRESS", "FateTxState_FAILED",
           "FateTxState_SUCCESSFUL", "FateTxState_UNKNOWN");
 
@@ -76,16 +92,21 @@ public class ManagerMetricsIT extends AccumuloClusterHarness {
 
   private final MetricsFileTailer metricsTail = new MetricsFileTailer("accumulo.sink.file-manager");
 
+  private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
+  private static final HttpRequest REQUEST =
+      HttpRequest.newBuilder().uri(java.net.URI.create("http://localhost:9234/metrics")).build();
+
   @Before
   public void setup() {
     accumuloClient = Accumulo.newClient().from(getClientProps()).build();
-    maxWait = defaultTimeoutSeconds() <= 0 ? 60_000 : ((defaultTimeoutSeconds() * 1000) / 2);
+    maxWait = defaultTimeoutSeconds() <= 0 ? 60_000 : ((defaultTimeoutSeconds() * 1000L) / 2);
     metricsTail.startDaemonThread();
   }
 
   @After
   public void cleanup() {
     metricsTail.close();
+    accumuloClient.close();
   }
 
   @Override
@@ -98,8 +119,8 @@ public class ManagerMetricsIT extends AccumuloClusterHarness {
    * from operation types.
    */
   @Test
-  public void metricsPublished() throws AccumuloException, AccumuloSecurityException {
-
+  public void managerMetricsPublishedHadoop() throws AccumuloException, AccumuloSecurityException {
+    // assume metrics are enabled via properties
     assumeTrue(accumuloClient.instanceOperations().getSystemConfiguration()
         .get(Property.MANAGER_FATE_METRICS_ENABLED.getKey()).compareTo("true") == 0);
 
@@ -111,11 +132,12 @@ public class ManagerMetricsIT extends AccumuloClusterHarness {
     Map<String,Long> firstSeenMap = parseLine(firstUpdate.getLine());
 
     log.info("L:{}", firstUpdate.getLine());
-    log.info("Expected: ({})", REQUIRED_METRIC_KEYS.size());
+    log.info("Expected: ({})", REQUIRED_METRIC_KEYS_HADOOP.size());
     log.info("M({}):{}", firstSeenMap.size(), firstSeenMap);
 
-    assertTrue(lookForExpectedKeys(firstSeenMap));
-    sanity(firstSeenMap);
+    // ensure all metrics arrived as expected
+    assertTrue(lookForExpectedKeys(firstSeenMap, REQUIRED_METRIC_KEYS_HADOOP));
+    sanityCheckHadoop(firstSeenMap);
 
     MetricsFileTailer.LineUpdate nextUpdate =
         metricsTail.waitForUpdate(firstUpdate.getLastUpdate(), NUM_TAIL_ATTEMPTS, TAIL_DELAY);
@@ -125,46 +147,85 @@ public class ManagerMetricsIT extends AccumuloClusterHarness {
     log.debug("Line received:{}", nextUpdate.getLine());
     log.trace("Mapped values:{}", updateSeenMap);
 
-    assertTrue(lookForExpectedKeys(updateSeenMap));
-    sanity(updateSeenMap);
+    assertTrue(lookForExpectedKeys(updateSeenMap, REQUIRED_METRIC_KEYS_HADOOP));
+    sanityCheckHadoop(updateSeenMap);
 
-    validate(firstSeenMap, updateSeenMap);
+    validateHadoop(firstSeenMap, updateSeenMap);
   }
 
   /**
-   * Run a few compactions - this should trigger the a dynamic op type to be included in the
-   * metrics.
+   * Validates that the expected metrics are published - this excludes the dynamic metrics derived
+   * from operation types.
    */
   @Test
-  public void compactionMetrics() throws AccumuloSecurityException, AccumuloException {
+  public void managerMetricsPublishedMicrometer()
+      throws AccumuloException, AccumuloSecurityException {
+    // assume metrics are enabled via properties
+    assumeTrue(accumuloClient.instanceOperations().getSystemConfiguration()
+        .get(Property.MANAGER_FATE_METRICS_ENABLED.getKey()).compareTo("true") == 0);
 
+    log.trace("Client started, properties:{}", accumuloClient.properties());
+
+    ScrapeUpdate firstScrape = captureMetricsAfterTimestampPrometheus(-1L);
+
+    log.info("S:{}", firstScrape);
+    log.info("Expected: ({})", REQUIRED_METRIC_KEYS_HADOOP.size());
+    log.info("M({})", firstScrape.values.size());
+
+    // ensure all metrics arrived as expected
+    assertTrue(lookForExpectedKeys(firstScrape.values, REQUIRED_METRIC_KEYS_MICROMETER));
+    sanityCheckMicrometer(firstScrape.values);
+
+    ScrapeUpdate nextScrape = captureMetricsAfterTimestampPrometheus(firstScrape.timestamp);
+
+    log.debug("Scrape received:{}", nextScrape);
+
+    assertTrue(lookForExpectedKeys(nextScrape.values, REQUIRED_METRIC_KEYS_MICROMETER));
+    sanityCheckMicrometer(nextScrape.values);
+
+    validateMicrometer(firstScrape.values, nextScrape.values);
+  }
+
+  /**
+   * Run a few compactions - this should trigger a dynamic op type to be included in the metrics.
+   */
+  @Test
+  public void compactionMetricsHadoop() throws AccumuloSecurityException, AccumuloException {
+    // assume metrics are enabled via properties
     assumeTrue(accumuloClient.instanceOperations().getSystemConfiguration()
         .get(Property.MANAGER_FATE_METRICS_ENABLED.getKey()).compareTo("true") == 0);
 
     MetricsFileTailer.LineUpdate firstUpdate =
         metricsTail.waitForUpdate(-1, NUM_TAIL_ATTEMPTS, TAIL_DELAY);
+    log.info("Received first metrics update {}", firstUpdate);
 
+    // make sure all expected metrics are present
+    assertTrue(lookForExpectedKeys(parseLine(firstUpdate.getLine()), REQUIRED_METRIC_KEYS_HADOOP));
+
+    // start compactions
     List<SlowOps> tables = new ArrayList<>();
-
+    String[] uniqueNames = getUniqueNames(tableCount);
     for (int i = 0; i < tableCount; i++) {
-      String uniqueName = getUniqueNames(1)[0] + "_" + i;
+      String uniqueName = uniqueNames[i] + "_" + i;
       SlowOps.setExpectedCompactions(accumuloClient, tableCount);
       SlowOps gen = new SlowOps(accumuloClient, uniqueName, maxWait);
       tables.add(gen);
       gen.startCompactTask();
     }
 
-    // check file tailer here....
+    // get next batch of metrics
     MetricsFileTailer.LineUpdate nextUpdate =
         metricsTail.waitForUpdate(firstUpdate.getLastUpdate(), NUM_TAIL_ATTEMPTS, TAIL_DELAY);
 
-    log.info("Received metrics {}", nextUpdate);
+    log.info("Received metrics update {}", nextUpdate);
 
-    Map<String,String> results = blockForRequiredTables();
+    // wait until there are in-progress operations present in the metrics
+    Map<String,String> results = blockForRequiredTablesHadoop();
 
     assertFalse(results.isEmpty());
-    log.error("IN_PROGRESS: {}", results.get("FateTxState_IN_PROGRESS"));
+    log.info("IN_PROGRESS: {}", results.get("FateTxState_IN_PROGRESS"));
 
+    // assert compactions are evident in metrics
     assertTrue(Long.parseLong(results.get("FateTxState_IN_PROGRESS")) >= tableCount);
     assertTrue(Long.parseLong(results.get("FateTxOpType_CompactRange")) >= tableCount);
 
@@ -173,6 +234,7 @@ public class ManagerMetricsIT extends AccumuloClusterHarness {
       assertTrue(Long.parseLong(results.get(k)) >= tableCount);
     }
 
+    // stop compactions
     for (SlowOps t : tables) {
       try {
         accumuloClient.tableOperations().cancelCompaction(t.getTableName());
@@ -189,20 +251,83 @@ public class ManagerMetricsIT extends AccumuloClusterHarness {
 
     // wait for one more metrics update after compactions cancelled.
     MetricsFileTailer.LineUpdate update =
-        metricsTail.waitForUpdate(0L, NUM_TAIL_ATTEMPTS, TAIL_DELAY);
+        metricsTail.waitForUpdate(-1L, NUM_TAIL_ATTEMPTS, TAIL_DELAY);
 
     metricsTail.waitForUpdate(update.getLastUpdate(), NUM_TAIL_ATTEMPTS, TAIL_DELAY);
 
     results = metricsTail.parseLine("");
 
-    log.info("Received metrics {}", results);
+    log.info("Received metrics update {}", results);
 
   }
 
-  private Map<String,String> blockForRequiredTables() {
+  /**
+   * Run a few compactions - this should trigger a dynamic op type to be included in the metrics.
+   */
+  @Test
+  public void compactionMetricsMicrometer() throws AccumuloException, AccumuloSecurityException {
+    // assume metrics are enabled via properties
+    assumeTrue(accumuloClient.instanceOperations().getSystemConfiguration()
+        .get(Property.MANAGER_FATE_METRICS_ENABLED.getKey()).compareTo("true") == 0);
+
+    ScrapeUpdate firstScrape = captureMetricsAfterTimestampPrometheus(-1L);
+    log.info("Received first metrics update {}", firstScrape);
+
+    // start compactions
+    List<SlowOps> tables = new ArrayList<>();
+    String[] uniqueNames = getUniqueNames(tableCount);
+    for (int i = 0; i < tableCount; i++) {
+      String uniqueName = uniqueNames[i] + "_" + i;
+      SlowOps.setExpectedCompactions(accumuloClient, tableCount);
+      SlowOps gen = new SlowOps(accumuloClient, uniqueName, maxWait);
+      tables.add(gen);
+      gen.startCompactTask();
+    }
+
+    // wait until there are in-progress operations present in the metrics
+    ScrapeUpdate nextScrape = blockForRequiredTablesMicrometer();
+    assertNotNull(nextScrape);
+    log.info("Received first metrics update {}", nextScrape);
+
+    log.info("IN_PROGRESS: {}", nextScrape.get("FateTxState_IN_PROGRESS"));
+
+    assertTrue(nextScrape.get("FateTxState_IN_PROGRESS") >= tableCount);
+
+    // assert compactions are evident in metrics
+    assertTrue(nextScrape.get("FateTxOpType_CompactRange") >= tableCount);
+    for (String k : OPTIONAL_METRIC_KEYS) {
+      assertTrue(nextScrape.values.containsKey(k));
+      assertTrue(nextScrape.get(k) >= tableCount);
+    }
+
+    // cancel compactions
+    for (SlowOps t : tables) {
+      try {
+        accumuloClient.tableOperations().cancelCompaction(t.getTableName());
+        // block if compaction still running
+        boolean cancelled = t.blockWhileCompactionRunning();
+        if (!cancelled) {
+          log.info("Failed to cancel compaction during multiple compaction test clean-up for {}",
+              t.getTableName());
+        }
+      } catch (AccumuloSecurityException | TableNotFoundException | AccumuloException ex) {
+        log.debug("Exception thrown during multiple table test clean-up", ex);
+      }
+    }
+
+    // wait for one more metrics update after compactions cancelled.
+    ScrapeUpdate lastUpdate = captureMetricsAfterTimestampPrometheus(nextScrape.timestamp);
+
+    captureMetricsAfterTimestampPrometheus(lastUpdate.timestamp);
+
+    log.info("Received metrics update {}", lastUpdate);
+
+  }
+
+  private Map<String,String> blockForRequiredTablesHadoop() {
 
     MetricsFileTailer.LineUpdate update =
-        metricsTail.waitForUpdate(0L, NUM_TAIL_ATTEMPTS, TAIL_DELAY);
+        metricsTail.waitForUpdate(-1L, NUM_TAIL_ATTEMPTS, TAIL_DELAY);
 
     for (int i = 0; i < 20; i++) {
 
@@ -228,15 +353,56 @@ public class ManagerMetricsIT extends AccumuloClusterHarness {
     return Collections.emptyMap();
   }
 
+  private ScrapeUpdate blockForRequiredTablesMicrometer() {
+
+    ScrapeUpdate update = captureMetricsAfterTimestampPrometheus(-1L);
+
+    for (int i = 0; i < 20; i++) {
+
+      update = captureMetricsAfterTimestampPrometheus(update.timestamp);
+
+      log.info("Received metrics update {}", update);
+
+      if (update.get("currentFateOps") >= tableCount) {
+        log.info("Found required number of fate operations");
+        return update;
+      }
+      try {
+        Thread.sleep(10_000);
+      } catch (InterruptedException iex) {
+        Thread.currentThread().interrupt();
+        return null;
+      }
+
+    }
+    return null;
+  }
+
   /**
-   * Validate metrics for consistency withing a run cycle.
+   * Validate metrics for consistency within a run cycle.
    *
    * @param values
    *          map of values from one run cycle.
    */
-  private void sanity(final Map<String,Long> values) {
+  private void sanityCheckHadoop(final Map<String,Long> values) {
 
     assertTrue(values.get("currentFateOps") <= values.get("totalFateOps"));
+
+    long total = values.entrySet().stream().filter(x -> x.getKey().startsWith("FateTxState_"))
+        .mapToLong(Map.Entry::getValue).sum();
+
+    assertTrue(total >= values.get("currentFateOps"));
+  }
+
+  /**
+   * Validate metrics for consistency within a run cycle.
+   *
+   * @param values
+   *          map of values from one run cycle.
+   */
+  private void sanityCheckMicrometer(final Map<String,Long> values) {
+
+    assertTrue(values.get("currentFateOps") <= values.get("zkChildFateOpsTotal"));
 
     long total = values.entrySet().stream().filter(x -> x.getKey().startsWith("FateTxState_"))
         .mapToLong(Map.Entry::getValue).sum();
@@ -253,9 +419,23 @@ public class ManagerMetricsIT extends AccumuloClusterHarness {
    * @param nextSeen
    *          map of a later metric update.
    */
-  private void validate(Map<String,Long> firstSeen, Map<String,Long> nextSeen) {
+  private void validateHadoop(Map<String,Long> firstSeen, Map<String,Long> nextSeen) {
     // total fate ops should not decrease.
     assertTrue(firstSeen.get("totalFateOps") <= nextSeen.get("totalFateOps"));
+  }
+
+  /**
+   * A series of sanity checks for the metrics between different update cycles, some values should
+   * be at least different, and some of the checks can include ordering.
+   *
+   * @param firstSeen
+   *          map of first metric update
+   * @param nextSeen
+   *          map of a later metric update.
+   */
+  private void validateMicrometer(Map<String,Long> firstSeen, Map<String,Long> nextSeen) {
+    // total fate ops should not decrease.
+    assertTrue(firstSeen.get("zkChildFateOpsTotal") <= nextSeen.get("zkChildFateOpsTotal"));
   }
 
   /**
@@ -280,20 +460,114 @@ public class ManagerMetricsIT extends AccumuloClusterHarness {
     for (String token : csvTokens) {
       token = token.trim();
       String[] parts = token.split("=");
-      if (REQUIRED_METRIC_KEYS.contains(parts[0])) {
+      if (REQUIRED_METRIC_KEYS_HADOOP.contains(parts[0])) {
         m.put(parts[0], Long.parseLong(parts[1]));
       }
     }
     return m;
   }
 
-  private boolean lookForExpectedKeys(final Map<String,Long> received) {
+  private class ScrapeUpdate {
+    private final Long timestamp = System.currentTimeMillis();
+    public final Map<String,Long> values;
 
-    for (String e : REQUIRED_METRIC_KEYS) {
-      if (!received.containsKey(e)) {
-        log.info("Couldn't find {}", e);
-        return false;
+    ScrapeUpdate(String scrape) {
+      values = parseScrape(scrape);
+
+      // ensure internal consistency
+      assertTrue(lookForExpectedKeys(values, REQUIRED_METRIC_KEYS_MICROMETER));
+    }
+
+    public Long get(String key) {
+      return values.get(key);
+    }
+
+    /**
+     * Prometheus displays metrics as a space separated key value pair. This method parses the
+     * Prometheus output into a map.
+     *
+     * @return a map of the metrics that start with AccGc
+     */
+    private Map<String,Long> parseScrape(String scrape) {
+      Map<String,Long> values = new TreeMap<>();
+      // try catch
+      Scanner scanner = new Scanner(scrape);
+      assertTrue("Scrape is empty", scanner.hasNextLine());
+      // put in while block
+      scanner.nextLine(); // bypass the timestamp
+      while (scanner.hasNextLine()) {
+        String line = scanner.nextLine();
+        if (line.startsWith("fate_status_Counts")) {
+          // line ex.
+          // fate_status_Counts{status="FateTxState_FAILED",} 0.0
+          String[] temp = line.split("\"");
+
+          assertEquals("Error while splitting line", 3, temp.length);
+          String key = temp[1]; // meter name
+          // temp[2] should look like: ',} 0.0' so we split on space ' '
+          String meterValue = temp[2].split(" ")[1];
+          BigInteger value = new BigDecimal(meterValue).toBigInteger(); // meter value
+          values.put(key, value.longValue());
+        }
       }
+      log.debug("Mapped values:{}", values);
+      return values;
+    }
+
+    @Override
+    public String toString() {
+      return values.toString();
+    }
+  }
+
+  private ScrapeUpdate captureMetricsAfterTimestampPrometheus(final long timestamp) {
+    for (int count = 0; count < NUM_TAIL_ATTEMPTS; count++) {
+      String scrape = getPrometheusScrape();
+      // check for valid metrics scrape update since the previous update
+      ScrapeUpdate scrapeUpdate = new ScrapeUpdate(scrape);
+      // adding 5 seconds since that is the time between metrics updates
+      if (scrapeUpdate.timestamp > timestamp) {
+        return scrapeUpdate;
+      }
+      try {
+        Thread.sleep(TAIL_DELAY);
+      } catch (InterruptedException e) {
+        e.printStackTrace();
+      }
+    }
+    throw new IllegalStateException(
+        String.format("File source update not received after %d tries in %d sec", NUM_TAIL_ATTEMPTS,
+            TimeUnit.MILLISECONDS.toSeconds(TAIL_DELAY * NUM_TAIL_ATTEMPTS)));
+  }
+
+  private String getPrometheusScrape() {
+    AtomicReference<String> scrape = new AtomicReference<>();
+    int count = 0;
+    while (true) {
+      try {
+        HTTP_CLIENT.sendAsync(REQUEST, HttpResponse.BodyHandlers.ofString())
+            .thenApply(HttpResponse::body).thenAccept(scrape::set).join();
+        break;
+      } catch (Exception e) {
+        if (++count == NUM_TAIL_ATTEMPTS)
+          throw e;
+      }
+      try {
+        Thread.sleep(TAIL_DELAY);
+      } catch (InterruptedException e) {
+        e.printStackTrace();
+      }
+    }
+    return scrape.get();
+  }
+
+  private boolean lookForExpectedKeys(final Map<String,Long> received, Set<String> keys) {
+    Set<String> diffSet = new TreeSet<>(keys);
+    diffSet.removeAll(received.keySet());
+
+    if (!diffSet.isEmpty()) {
+      log.error("Couldn't find {} in received metrics update", diffSet);
+      return false;
     }
 
     return true;

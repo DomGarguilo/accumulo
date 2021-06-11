@@ -19,11 +19,15 @@
 package org.apache.accumulo.manager.metrics;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
+import io.micrometer.core.instrument.Gauge;
 import org.apache.accumulo.core.clientImpl.Tables;
 import org.apache.accumulo.core.manager.state.tables.TableState;
 import org.apache.accumulo.core.replication.ReplicationTable;
@@ -37,15 +41,27 @@ import org.apache.hadoop.metrics2.lib.MutableStat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+
 public class ReplicationMetrics extends ManagerMetrics {
 
   private static final Logger log = LoggerFactory.getLogger(ReplicationMetrics.class);
+
+  private final String PENDING_FILES = "filesPendingReplication";
+  private final String NUM_PEERS = "numPeers";
+  private final String MAX_REPLICATION_THREADS = "maxReplicationThreads";
 
   private final Manager manager;
   private final ReplicationUtil replicationUtil;
   private final MutableQuantiles replicationQueueTimeQuantiles;
   private final MutableStat replicationQueueTimeStat;
   private final Map<Path,Long> pathModTimes;
+
+  private final Timer replicationQueueTimer;
+  private AtomicLong pendingFiles;
+  private AtomicInteger numPeers;
+  private AtomicInteger maxReplicationThreads;
 
   ReplicationMetrics(Manager manager) {
     super("Replication", "Data-Center Replication Metrics", "ManagerReplication");
@@ -59,22 +75,41 @@ public class ReplicationMetrics extends ManagerMetrics {
         "Replication queue time quantiles in milliseconds", "ops", "latency", 600);
     replicationQueueTimeStat = registry.newStat("replicationQueue",
         "Replication queue time statistics in milliseconds", "ops", "latency", true);
+
+    MeterRegistry meterRegistry = this.manager.getMicrometerMetrics().getRegistry();
+    replicationQueueTimer = meterRegistry.timer("replicationQueue");
+    pendingFiles = meterRegistry.gauge(PENDING_FILES, new AtomicLong(0L));
+    numPeers = meterRegistry.gauge(NUM_PEERS, new AtomicInteger(0));
+    maxReplicationThreads = meterRegistry.gauge(MAX_REPLICATION_THREADS, new AtomicInteger(0));
   }
 
   @Override
   protected void prepareMetrics() {
-    final String PENDING_FILES = "filesPendingReplication";
     // Only add these metrics if the replication table is online and there are peers
     if (TableState.ONLINE == Tables.getTableState(manager.getContext(), ReplicationTable.ID)
         && !replicationUtil.getPeers().isEmpty()) {
-      getRegistry().add(PENDING_FILES, getNumFilesPendingReplication());
+      Long numPendingFiles = getNumFilesPendingReplication();
+      // hadoop meter
+      getRegistry().add(PENDING_FILES, numPendingFiles);
+      // micrometer gauge
+      pendingFiles.set(numPendingFiles);
       addReplicationQueueTimeMetrics();
     } else {
       getRegistry().add(PENDING_FILES, 0);
+      // micrometer gauge
+      pendingFiles.set(0);
     }
 
-    getRegistry().add("numPeers", getNumConfiguredPeers());
-    getRegistry().add("maxReplicationThreads", getMaxReplicationThreads());
+    // maybe convert to atomicint wraped gauge?
+    // not sure whats a good replacement for this seeming single post functionality, registry.add()
+    int numConfigPeers = getNumConfiguredPeers();
+    int maxRepThreads = getMaxReplicationThreads();
+    // hadoop
+    getRegistry().add(NUM_PEERS, numConfigPeers);
+    getRegistry().add(MAX_REPLICATION_THREADS, maxRepThreads);
+    // micrometer
+    numPeers.set(numConfigPeers);
+    maxReplicationThreads.set(maxRepThreads);
   }
 
   protected long getNumFilesPendingReplication() {
@@ -122,8 +157,8 @@ public class ReplicationMetrics extends ManagerMetrics {
               manager.getVolumeManager().getFileStatus(path).getModificationTime());
         } catch (IOException e) {
           // Ignore all IOExceptions
-          // Either the system is unavailable or the file was deleted
-          // since the initial scan and this check
+          // Either the system is unavailable, or the file was deleted since the initial scan and
+          // this check
           log.trace(
               "Failed to get file status for {}, file system is unavailable or it does not exist",
               path);
@@ -140,6 +175,7 @@ public class ReplicationMetrics extends ManagerMetrics {
       return;
     }
 
+    // not sure how to do this with micrometer timer
     replicationQueueTimeStat.resetMinMax();
 
     for (Path path : deletedPaths) {
@@ -147,6 +183,9 @@ public class ReplicationMetrics extends ManagerMetrics {
       Long modTime = pathModTimes.remove(path);
       if (modTime != null) {
         long diff = Math.max(0, currentTime - modTime);
+        // micrometer timer
+        replicationQueueTimer.record(Duration.ofMillis(diff));
+        // hadoop meters
         replicationQueueTimeQuantiles.add(diff);
         replicationQueueTimeStat.add(diff);
       }

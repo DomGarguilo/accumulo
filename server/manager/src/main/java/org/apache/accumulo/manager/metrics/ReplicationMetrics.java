@@ -59,9 +59,9 @@ public class ReplicationMetrics extends ManagerMetrics {
   private final Map<Path,Long> pathModTimes;
 
   private final Timer replicationQueueTimer;
-  private AtomicLong pendingFiles;
-  private AtomicInteger numPeers;
-  private AtomicInteger maxReplicationThreads;
+  private final AtomicLong pendingFiles;
+  private final AtomicInteger numPeers;
+  private final AtomicInteger maxReplicationThreads;
 
   ReplicationMetrics(Manager manager) {
     super("Replication", "Data-Center Replication Metrics", "ManagerReplication");
@@ -78,7 +78,7 @@ public class ReplicationMetrics extends ManagerMetrics {
 
     MeterRegistry meterRegistry = this.manager.getMicrometerMetrics().getRegistry();
     replicationQueueTimer = meterRegistry.timer("replicationQueue");
-    pendingFiles = meterRegistry.gauge(PENDING_FILES, new AtomicLong(0L));
+    pendingFiles = meterRegistry.gauge(PENDING_FILES, new AtomicLong(0));
     numPeers = meterRegistry.gauge(NUM_PEERS, new AtomicInteger(0));
     maxReplicationThreads = meterRegistry.gauge(MAX_REPLICATION_THREADS, new AtomicInteger(0));
   }
@@ -88,7 +88,7 @@ public class ReplicationMetrics extends ManagerMetrics {
     // Only add these metrics if the replication table is online and there are peers
     if (TableState.ONLINE == Tables.getTableState(manager.getContext(), ReplicationTable.ID)
         && !replicationUtil.getPeers().isEmpty()) {
-      Long numPendingFiles = getNumFilesPendingReplication();
+      long numPendingFiles = getNumFilesPendingReplication();
       // hadoop meter
       getRegistry().add(PENDING_FILES, numPendingFiles);
       // micrometer gauge

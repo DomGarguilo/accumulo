@@ -20,10 +20,11 @@ package org.apache.accumulo.server.conf;
 
 import java.io.FileNotFoundException;
 import java.nio.file.Path;
+import java.util.Set;
 
 import org.apache.accumulo.core.cli.Help;
-import org.apache.accumulo.core.client.TableNotFoundException;
 import org.apache.accumulo.core.conf.AccumuloConfiguration;
+import org.apache.accumulo.core.conf.SiteConfiguration;
 import org.apache.accumulo.core.data.TableId;
 import org.apache.accumulo.core.spi.common.ServiceEnvironment;
 import org.apache.accumulo.core.spi.compaction.CompactionPlanner;
@@ -75,44 +76,25 @@ public class CheckCompactionConfig implements KeywordExecutable {
     if (!path.toFile().exists())
       throw new FileNotFoundException("File at given path could not be found");
 
-    AccumuloConfiguration config = null; // TODO convert file from command line to Accumulo config
-    var servicesConfig = new CompactionServicesConfig(config, msg -> log.warn(msg));
+    AccumuloConfiguration config = SiteConfiguration.fromFile(path.toFile()).build();
+    var servicesConfig = new CompactionServicesConfig(config, log::warn);
+    ServiceEnvironment senv = createServiceEnvironment(config);
 
-    for (String serviceId : servicesConfig.getPlanners().keySet()) {
-      String plannerClass = servicesConfig.getPlanners().get(serviceId);
+    Set<String> defaultServices = Set.of("default", "meta", "root");
+    if (servicesConfig.getPlanners().keySet().equals(defaultServices)) {
+      throw new IllegalArgumentException("Only the default compaction services were created");
+    }
 
-      // TODO better more standard Accumulo way to load class?
-      var planner = getClass().getClassLoader().loadClass(plannerClass)
-          .asSubclass(CompactionPlanner.class).newInstance();
+    for (var entry : servicesConfig.getPlanners().entrySet()) {
+      String serviceId = entry.getKey();
+      String plannerClassName = entry.getValue();
 
-      ServiceEnvironment senv = new ServiceEnvironment() {
+      log.info("Service id: {}, planner class:{}", serviceId, plannerClassName);
 
-        @Override
-        public <T> T instantiate(TableId tableId, String className, Class<T> base)
-            throws Exception {
-          throw new UnsupportedOperationException();
-        }
+      Class<? extends CompactionPlanner> plannerClass =
+          Class.forName(plannerClassName).asSubclass(CompactionPlanner.class);
+      CompactionPlanner planner = plannerClass.getDeclaredConstructor().newInstance();
 
-        @Override
-        public <T> T instantiate(String className, Class<T> base) throws Exception {
-          throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public String getTableName(TableId tableId) throws TableNotFoundException {
-          throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public Configuration getConfiguration(TableId tableId) {
-          return new ConfigurationImpl(config);
-        }
-
-        @Override
-        public Configuration getConfiguration() {
-          return new ConfigurationImpl(config);
-        }
-      };
       var initParams = new CompactionPlannerInitParams(CompactionServiceId.of(serviceId),
           servicesConfig.getOptions().get(serviceId), senv);
 
@@ -120,16 +102,46 @@ public class CheckCompactionConfig implements KeywordExecutable {
 
       initParams.getRequestedExecutors()
           .forEach((execId, numThreads) -> log.info(
-              "Compaction service {} requested creation of thread pool {} with {} threads.",
+              "Compaction service '{}' requested creation of thread pool '{}' with {} threads.",
               serviceId, execId, numThreads));
 
       initParams.getRequestedExternalExecutors()
           .forEach(execId -> log.info(
-              "Compaction service {} requested used of external execution queue {}", serviceId,
+              "Compaction service '{}' requested with external execution queue '{}'", serviceId,
               execId));
 
     }
 
     log.info("Properties file has passed all checks.");
+  }
+
+  private ServiceEnvironment createServiceEnvironment(AccumuloConfiguration config) {
+    return new ServiceEnvironment() {
+
+      @Override
+      public <T> T instantiate(TableId tableId, String className, Class<T> base) {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public <T> T instantiate(String className, Class<T> base) {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public String getTableName(TableId tableId) {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public Configuration getConfiguration(TableId tableId) {
+        return new ConfigurationImpl(config);
+      }
+
+      @Override
+      public Configuration getConfiguration() {
+        return new ConfigurationImpl(config);
+      }
+    };
   }
 }

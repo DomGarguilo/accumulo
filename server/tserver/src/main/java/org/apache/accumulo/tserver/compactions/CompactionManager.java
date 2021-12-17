@@ -18,6 +18,8 @@
  */
 package org.apache.accumulo.tserver.compactions;
 
+import static org.apache.accumulo.core.util.compaction.CompactionServicesConfig.DEFAULT_SERVICE;
+
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -52,8 +54,6 @@ import org.slf4j.LoggerFactory;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Sets;
 
-import static org.apache.accumulo.core.util.compaction.CompactionServicesConfig.DEFAULT_SERVICE;
-
 public class CompactionManager {
 
   private static final Logger log = LoggerFactory.getLogger(CompactionManager.class);
@@ -78,7 +78,7 @@ public class CompactionManager {
   private Map<ExternalCompactionId,ExtCompInfo> runningExternalCompactions;
 
   private String lastDeprecationWarning = "";
-  
+
   static class ExtCompInfo {
     final KeyExtent extent;
     final CompactionExecutorId executor;
@@ -95,7 +95,7 @@ public class CompactionManager {
       lastDeprecationWarning = warning;
     }
   }
-  
+
   private void mainLoop() {
     long lastCheckAllTime = System.nanoTime();
 
@@ -184,7 +184,8 @@ public class CompactionManager {
       CompactionExecutorsMetrics ceMetrics) {
     this.compactables = compactables;
 
-    this.currentCfg = new CompactionServicesConfig(context.getConfiguration(), this::warnAboutDeprecation);
+    this.currentCfg =
+        new CompactionServicesConfig(context.getConfiguration(), this::warnAboutDeprecation);
 
     this.context = context;
 
@@ -231,7 +232,8 @@ public class CompactionManager {
 
       lastConfigCheckTime = System.nanoTime();
 
-      var tmpCfg = new CompactionServicesConfig(context.getConfiguration(), this::warnAboutDeprecation);
+      var tmpCfg =
+          new CompactionServicesConfig(context.getConfiguration(), this::warnAboutDeprecation);
 
       if (!currentCfg.equals(tmpCfg)) {
         Map<CompactionServiceId,CompactionService> tmpServices = new HashMap<>();

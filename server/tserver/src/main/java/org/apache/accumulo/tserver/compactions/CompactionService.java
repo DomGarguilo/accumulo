@@ -101,7 +101,8 @@ public class CompactionService {
     this.ceMetrics = ceMetrics;
     this.externExecutorSupplier = externExecutorSupplier;
 
-    var initParams = new CompactionPlannerInitParams(myId, plannerOpts, new ServiceEnvironmentImpl(context));
+    var initParams =
+        new CompactionPlannerInitParams(myId, plannerOpts, new ServiceEnvironmentImpl(context));
     planner = createPlanner(plannerClass);
     planner.init(initParams);
 
@@ -361,7 +362,8 @@ public class CompactionService {
     if (this.plannerClassName.equals(plannerClassName) && this.plannerOpts.equals(plannerOptions))
       return;
 
-    var initParams = new CompactionPlannerInitParams(myId, plannerOptions, new ServiceEnvironmentImpl(context));
+    var initParams =
+        new CompactionPlannerInitParams(myId, plannerOptions, new ServiceEnvironmentImpl(context));
     var tmpPlanner = createPlanner(plannerClassName);
     tmpPlanner.init(initParams);
 

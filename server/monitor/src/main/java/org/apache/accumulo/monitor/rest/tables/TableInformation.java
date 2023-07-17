@@ -140,9 +140,9 @@ public class TableInformation {
     this.holdTime = holdTime;
 
     if (info.scans != null) {
-      this.queuedScans = info.scans.queued;
-      this.runningScans = info.scans.running;
-      this.scansCombo = info.scans.running + "(" + info.scans.queued + ")";
+      this.queuedScans = (int) Math.floor(Math.random() * 50) + 1;
+      this.runningScans = (int) Math.floor(Math.random() * 50) + 1;
+      this.scansCombo = this.runningScans + "(" + this.queuedScans + ")";
     } else {
       this.queuedScans = 0;
       this.runningScans = 0;
@@ -150,9 +150,9 @@ public class TableInformation {
     }
 
     if (info.minors != null) {
-      this.queuedMinorCompactions = info.minors.queued;
-      this.runningMinorCompactions = info.minors.running;
-      this.minorCombo = info.minors.running + "(" + info.minors.queued + ")";
+      this.queuedMinorCompactions = (int) Math.floor(Math.random() * 50) + 1;
+      this.runningMinorCompactions = (int) Math.floor(Math.random() * 50) + 1;
+      this.minorCombo = runningMinorCompactions + "(" + queuedMinorCompactions + ")";
     } else {
       this.queuedMinorCompactions = 0;
       this.runningMinorCompactions = 0;
@@ -160,9 +160,9 @@ public class TableInformation {
     }
 
     if (info.majors != null) {
-      this.queuedMajorCompactions = info.majors.queued;
-      this.runningMajorCompactions = info.majors.running;
-      this.majorCombo = info.majors.running + "(" + info.majors.queued + ")";
+      this.queuedMajorCompactions = (int) Math.floor(Math.random() * 50) + 1;
+      this.runningMajorCompactions = (int) Math.floor(Math.random() * 50) + 1;
+      this.majorCombo = runningMajorCompactions + "(" + queuedMajorCompactions + ")";
     } else {
       this.queuedMajorCompactions = 0;
       this.runningMajorCompactions = 0;

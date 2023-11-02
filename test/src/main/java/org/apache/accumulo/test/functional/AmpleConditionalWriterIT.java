@@ -26,6 +26,7 @@ import static org.apache.accumulo.core.metadata.schema.TabletMetadata.ColumnType
 import static org.apache.accumulo.core.metadata.schema.TabletMetadata.ColumnType.FLUSH_ID;
 import static org.apache.accumulo.core.metadata.schema.TabletMetadata.ColumnType.LOADED;
 import static org.apache.accumulo.core.metadata.schema.TabletMetadata.ColumnType.LOCATION;
+import static org.apache.accumulo.core.metadata.schema.TabletMetadata.ColumnType.LOGS;
 import static org.apache.accumulo.core.metadata.schema.TabletMetadata.ColumnType.SELECTED;
 import static org.apache.accumulo.core.metadata.schema.TabletMetadata.ColumnType.TIME;
 import static org.apache.accumulo.core.util.LazySingletons.GSON;
@@ -73,6 +74,7 @@ import org.apache.accumulo.core.metadata.schema.TabletMetadata.LocationType;
 import org.apache.accumulo.core.metadata.schema.TabletOperationId;
 import org.apache.accumulo.core.metadata.schema.TabletOperationType;
 import org.apache.accumulo.core.security.TablePermission;
+import org.apache.accumulo.core.tabletserver.log.LogEntry;
 import org.apache.accumulo.harness.AccumuloClusterHarness;
 import org.apache.accumulo.server.metadata.ConditionalTabletsMutatorImpl;
 import org.apache.accumulo.server.zookeeper.TransactionWatcher;
@@ -316,6 +318,71 @@ public class AmpleConditionalWriterIT extends AccumuloClusterHarness {
       assertEquals(Status.REJECTED, results.get(e1).getStatus());
 
       assertEquals(Set.of(stf6), context.getAmple().readTablet(e1).getFiles());
+    }
+  }
+
+  @Test
+  public void testWALs() {
+    try (AccumuloClient c = Accumulo.newClient().from(getClientProps()).build()) {
+      var context = cluster.getServerContext();
+
+      // put a WAL on the tablet
+      var ctmi = new ConditionalTabletsMutatorImpl(context);
+      final LogEntry originalLogEntry = new LogEntry(e1, 55L, "lf1");
+      ctmi.mutateTablet(e1).requireAbsentOperation().putWal(originalLogEntry).submit(tm -> false);
+      var results = ctmi.process();
+      assertEquals(Status.ACCEPTED, results.get(e1).getStatus());
+
+      assertEquals(List.of(originalLogEntry).toString(),
+          context.getAmple().readTablet(e1).getLogs().toString(),
+          "Expected to see LogEntry that was written.");
+
+      var stf1 = StoredTabletFile
+          .of(new Path("hdfs://localhost:8020/accumulo/tables/2a/default_tablet/F0000070.rf"));
+      var dfv = new DataFileValue(100, 100);
+
+      // make sure requireSame with the same LogEntry passes
+      var tm1 = TabletMetadata.builder(e1).putWal(originalLogEntry).build(LOGS, FILES);
+      ctmi = new ConditionalTabletsMutatorImpl(context);
+      ctmi.mutateTablet(e1).requireAbsentOperation().requireSame(tm1, LOGS).putFile(stf1, dfv)
+          .submit(tm -> false);
+      results = ctmi.process();
+      var result = results.get(e1);
+      if (result.getStatus().equals(Status.REJECTED)) {
+        System.out.println(result.readMetadata().getLogs().toString());
+      }
+      assertEquals(Status.ACCEPTED, results.get(e1).getStatus());
+
+      assertEquals(List.of(originalLogEntry).toString(),
+          context.getAmple().readTablet(e1).getLogs().toString(),
+          "Expected to see LogEntry that was written.");
+
+      // change the WAL on the tablet
+      ctmi = new ConditionalTabletsMutatorImpl(context);
+      final LogEntry newLogEntry = new LogEntry(e1, 57L, "lf1");
+      ctmi.mutateTablet(e1).requireAbsentOperation().putWal(newLogEntry).submit(tm -> false);
+      results = ctmi.process();
+      assertEquals(Status.ACCEPTED, results.get(e1).getStatus());
+
+      // ensure the WAL is as expected (the new one we just wrote)
+      assertEquals(List.of(newLogEntry).toString(),
+          context.getAmple().readTablet(e1).getLogs().toString(),
+          "Expected to see LogEntry that was written.");
+
+      // check against the original LogEntry which should fail
+      ctmi = new ConditionalTabletsMutatorImpl(context);
+      ctmi.mutateTablet(e1).requireAbsentOperation().requireSame(tm1, LOGS).deleteFile(stf1)
+          .submit(tm -> false);
+      results = ctmi.process();
+      assertEquals(Status.REJECTED, results.get(e1).getStatus());
+
+      // try the same operation but with the current, correct LogEntry
+      var tm2 = TabletMetadata.builder(e1).putWal(newLogEntry).build(LOGS);
+      ctmi = new ConditionalTabletsMutatorImpl(context);
+      ctmi.mutateTablet(e1).requireAbsentOperation().requireSame(tm2, LOGS).deleteFile(stf1)
+          .submit(tm -> false);
+      results = ctmi.process();
+      assertEquals(Status.ACCEPTED, results.get(e1).getStatus());
     }
   }
 

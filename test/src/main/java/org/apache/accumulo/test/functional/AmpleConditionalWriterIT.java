@@ -30,6 +30,7 @@ import static org.apache.accumulo.core.metadata.schema.TabletMetadata.ColumnType
 import static org.apache.accumulo.core.metadata.schema.TabletMetadata.ColumnType.SELECTED;
 import static org.apache.accumulo.core.metadata.schema.TabletMetadata.ColumnType.TIME;
 import static org.apache.accumulo.core.util.LazySingletons.GSON;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -44,8 +45,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
+import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.apache.accumulo.core.Constants;
 import org.apache.accumulo.core.client.Accumulo;
@@ -323,12 +326,13 @@ public class AmpleConditionalWriterIT extends AccumuloClusterHarness {
 
   @Test
   public void testWALs() {
-    try (AccumuloClient c = Accumulo.newClient().from(getClientProps()).build()) {
       var context = cluster.getServerContext();
+
+      String filePath = java.nio.file.Path.of("tserver:8080", UUID.randomUUID().toString()).toString();
 
       // put a WAL on the tablet
       var ctmi = new ConditionalTabletsMutatorImpl(context);
-      final LogEntry originalLogEntry = new LogEntry(e1, 55L, "lf1");
+      final LogEntry originalLogEntry = new LogEntry( 55L, filePath);
       ctmi.mutateTablet(e1).requireAbsentOperation().putWal(originalLogEntry).submit(tm -> false);
       var results = ctmi.process();
       assertEquals(Status.ACCEPTED, results.get(e1).getStatus());
@@ -351,6 +355,25 @@ public class AmpleConditionalWriterIT extends AccumuloClusterHarness {
       if (result.getStatus().equals(Status.REJECTED)) {
         System.out.println(result.readMetadata().getLogs().toString());
       }
+
+      var fromResult = result.readMetadata().getLogs().stream()
+              .map(logEntry -> logEntry.toString().getBytes(UTF_8))
+              .collect(Collectors.toList());
+
+      // 1. Serialize the objects in the same way they are serialized in the SetEqualityIterator.
+      List<byte[]> serializedLogsFromTabletMetadata = context.getAmple().readTablet(e1).getLogs().stream()
+              .map(logEntry -> logEntry.toString().getBytes(UTF_8))
+              .collect(Collectors.toList());
+
+      List<byte[]> serializedLogsFromTest = Stream.of(originalLogEntry)
+              .map(logEntry -> logEntry.toString().getBytes(UTF_8))
+              .collect(Collectors.toList());
+
+      assertArrayEquals(serializedLogsFromTest.get(0), serializedLogsFromTabletMetadata.get(0), "Serialized logs are not equal!");
+      assertArrayEquals(serializedLogsFromTest.get(0), fromResult.get(0), "Serialized logs are not equal!");
+      System.out.println("Serialized logs from TabletMetadata: " + new String(serializedLogsFromTabletMetadata.get(0), UTF_8));
+      System.out.println("Serialized logs from Test: " + new String(serializedLogsFromTest.get(0), UTF_8));
+
       assertEquals(Status.ACCEPTED, results.get(e1).getStatus());
 
       assertEquals(List.of(originalLogEntry).toString(),
@@ -359,7 +382,7 @@ public class AmpleConditionalWriterIT extends AccumuloClusterHarness {
 
       // change the WAL on the tablet
       ctmi = new ConditionalTabletsMutatorImpl(context);
-      final LogEntry newLogEntry = new LogEntry(e1, 57L, "lf1");
+      final LogEntry newLogEntry = new LogEntry( 57L, filePath);
       ctmi.mutateTablet(e1).requireAbsentOperation().putWal(newLogEntry).submit(tm -> false);
       results = ctmi.process();
       assertEquals(Status.ACCEPTED, results.get(e1).getStatus());
@@ -383,7 +406,6 @@ public class AmpleConditionalWriterIT extends AccumuloClusterHarness {
           .submit(tm -> false);
       results = ctmi.process();
       assertEquals(Status.ACCEPTED, results.get(e1).getStatus());
-    }
   }
 
   @Test

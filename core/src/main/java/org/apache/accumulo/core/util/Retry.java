@@ -268,6 +268,12 @@ public class Retry {
      * @return this builder with the maximum number of retries set to the provided value
      */
     NeedsRetryDelay maxRetries(long max);
+
+    /**
+     * @return this builder with the maximum number of retries set to the number of retries that can
+     *         occur within the given duration
+     */
+    NeedsRetryDelay retriesForDuration(long duration, TimeUnit unit);
   }
 
   public interface NeedsRetryDelay {
@@ -377,6 +383,28 @@ public class Retry {
       checkState();
       Preconditions.checkArgument(max >= 0, "Maximum number of retries must not be negative");
       this.maxRetries = max;
+      return this;
+    }
+
+    @Override
+    public NeedsRetryDelay retriesForDuration(long duration, TimeUnit unit) {
+      checkState();
+      long durationInMillis = unit.toMillis(duration);
+      long totalWait = 0;
+      long retries = 0;
+      long currentWait = initialWait;
+      while (totalWait < durationInMillis && (maxRetries == -1 || retries < maxRetries)) {
+        totalWait += currentWait;
+        if (totalWait < durationInMillis) {
+          retries++;
+          if (backOffFactor > 1) {
+            currentWait = Math.min(maxWait, (long) (currentWait * backOffFactor));
+          } else {
+            currentWait = Math.min(maxWait, currentWait + waitIncrement);
+          }
+        }
+      }
+      this.maxRetries = retries;
       return this;
     }
 

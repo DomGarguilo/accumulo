@@ -344,4 +344,37 @@ public class RetryTest {
       }
     }
   }
+
+  @Test
+  public void testRetriesForDuration() throws InterruptedException {
+    final TimeUnit unit = MILLISECONDS;
+    final long duration = 10_000;
+
+    Retry retry = Retry.builder().retriesForDuration(duration, unit).retryAfter(100, unit)
+        .incrementBy(100, unit).maxWait(500, unit).backOffFactor(1.5).logInterval(3, MINUTES)
+        .createRetry();
+
+    long totalTime = 0;
+    long expectedRetries = 0;
+
+    // While the total wait time is less than the duration and there are retries left
+    while (totalTime <= duration && retry.canRetry()) {
+      totalTime += retry.getCurrentWait();
+      if (totalTime <= duration) {
+        retry.useRetry();
+        expectedRetries++;
+        if (retry.canRetry()) {
+          try {
+            retry.waitForNextAttempt(log, "Iteration " + expectedRetries);
+          } catch (IllegalArgumentException | InterruptedException e) {
+            log.error("Failed on iteration: {}", expectedRetries, e);
+            throw e;
+          }
+        }
+      }
+    }
+
+    assertEquals(expectedRetries, retry.retriesCompleted());
+  }
+
 }

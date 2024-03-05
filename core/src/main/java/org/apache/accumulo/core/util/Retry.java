@@ -364,6 +364,7 @@ public class Retry {
     private Duration waitIncrement;
     private Duration logInterval;
     private double backOffFactor = 1.5;
+    private Duration retriesForDuration = null;
 
     RetryFactoryBuilder() {}
 
@@ -390,23 +391,58 @@ public class Retry {
     @Override
     public NeedsRetryDelay retriesForDuration(Duration duration) {
       checkState();
-      long durationInMillis = unit.toMillis(duration);
-      long totalWait = 0;
-      long retries = 0;
-      long currentWait = initialWait;
-      while (totalWait < durationInMillis && (maxRetries == -1 || retries < maxRetries)) {
-        totalWait += currentWait;
-        if (totalWait < durationInMillis) {
-          retries++;
-          if (backOffFactor > 1) {
-            currentWait = Math.min(maxWait, (long) (currentWait * backOffFactor));
-          } else {
-            currentWait = Math.min(maxWait, currentWait + waitIncrement);
-          }
+      Preconditions.checkState(!duration.isNegative(), "Duration must not be negative");
+      this.retriesForDuration = duration;
+      return this;
+    }
+
+    private void calculateRetriesForDuration() {
+      long durationMillis = this.retriesForDuration.toMillis();
+      long totalWaitMillis = initialWait.toMillis();
+      long currentWaitMillis = totalWaitMillis;
+
+      System.out.println("Duration in milliseconds: " + durationMillis);
+
+      long retries = 0L;
+      // if the initial wait already exceeds or meets the duration
+      if (totalWaitMillis >= durationMillis) {
+        this.maxRetries = retries;
+        return;
+      }
+
+      while (totalWaitMillis + currentWaitMillis <= durationMillis) {
+
+        if (backOffFactor > 1) {
+          currentWaitMillis = (long) (currentWaitMillis * backOffFactor);
+        } else {
+          currentWaitMillis += waitIncrement.toMillis();
+        }
+        System.out.println("Current wait time in milliseconds: " + currentWaitMillis);
+
+        // Ensure the wait time does not exceed maxWait
+        if (currentWaitMillis > maxWait.toMillis()) {
+          currentWaitMillis = maxWait.toMillis();
+        }
+
+        // Break if adding another wait period would exceed the duration
+        if (totalWaitMillis + currentWaitMillis > durationMillis) {
+          System.out.println("Breaking the loop as the total wait time would exceed the duration");
+          break;
+        }
+
+        totalWaitMillis += currentWaitMillis;
+        System.out.println("Total wait time in milliseconds: " + totalWaitMillis);
+        retries++;
+        System.out.println("Number of retries: " + retries);
+
+        if (retries > 100) {
+          System.out.println("Breaking the loop as the number of retries exceeds 100");
+          break;
         }
       }
+
       this.maxRetries = retries;
-      return this;
+      System.out.println("Max retries set to: " + this.maxRetries);
     }
 
     @Override
@@ -462,6 +498,10 @@ public class Retry {
 
     @Override
     public Retry createRetry() {
+      if (retriesForDuration != null) {
+        calculateRetriesForDuration();
+      }
+      this.modifiable = false;
       return new Retry(maxRetries, initialWait, waitIncrement, maxWait, logInterval, backOffFactor);
     }
 

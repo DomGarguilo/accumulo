@@ -34,6 +34,7 @@ import org.apache.accumulo.core.util.Retry.RetryFactory;
 import org.easymock.EasyMock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -352,36 +353,91 @@ public class RetryTest {
     }
   }
 
+  @Timeout(30)
   @Test
   public void testRetriesForDuration() throws InterruptedException {
-    final TimeUnit unit = MILLISECONDS;
-    final long duration = 10_000;
+    final Duration duration = Duration.ofSeconds(10);
+    final Duration increment = Duration.ofMillis(500);
+    Retry retry = Retry.builder().retriesForDuration(duration).retryAfter(Duration.ofMillis(0))
+        .incrementBy(increment).maxWait(increment).backOffFactor(1)
+        .logInterval(Duration.ofMinutes(3)).createRetry();
 
-    Retry retry = Retry.builder().retriesForDuration(duration, unit).retryAfter(100, unit)
-        .incrementBy(100, unit).maxWait(500, unit).backOffFactor(1.5).logInterval(3, MINUTES)
-        .createRetry();
+    // with the backoff factor set to 1 and with max wait set to the increment value, the expected
+    // number of retries is the duration divided by the increment
+    long expectedRetries = duration.dividedBy(increment);
 
-    long totalTime = 0;
-    long expectedRetries = 0;
+    assertExpectedRetries(retry, duration, expectedRetries);
+  }
 
+  @Timeout(30)
+  @Test
+  public void testRetriesForDurationWithInitial() throws InterruptedException {
+    final Duration duration = Duration.ofSeconds(10);
+    final Duration increment = Duration.ofMillis(500);
+    final Duration initialWait = Duration.ofMillis(400);
+    Retry retry =
+        Retry.builder().retriesForDuration(duration).retryAfter(initialWait).incrementBy(increment)
+            .maxWait(increment).backOffFactor(1).logInterval(Duration.ofMinutes(3)).createRetry();
+
+    // with the backoff factor set to 1 and with max wait set to the increment value, the expected
+    // number of retries is the duration minus the initial wait divided by the increment
+    long expectedRetries = duration.minus(initialWait).dividedBy(increment);
+
+    assertExpectedRetries(retry, duration, expectedRetries);
+  }
+
+  @Timeout(30)
+  @Test
+  public void testRetriesForDuration2() throws InterruptedException {
+    final Duration increment = Duration.ofMillis(100);
+    final double backOffFactor = 2;
+    Duration maxWait = Duration.ofMillis(800); // Allows for 4 doublings 100- > 200 -> 400 -> 800
+    final Duration initialWait = Duration.ofMillis(50);
+
+    // Total duration accounting for the initial wait, the max wait, and the backoff factor
+    Duration duration =
+        initialWait.plus(Duration.ofMillis(100 + 200 + 400 + 800 + 800 + 800 + 800));
+
+    // count up the expected retries from the calculation above
+    long expectedRetries = 7;
+
+    Retry retry = Retry.builder().retriesForDuration(duration).retryAfter(initialWait)
+        .incrementBy(increment).maxWait(maxWait).backOffFactor(backOffFactor)
+        .logInterval(Duration.ofMinutes(3)).createRetry();
+
+    assertExpectedRetries(retry, duration, expectedRetries);
+  }
+
+  private static void assertExpectedRetries(Retry retry, Duration duration, long expectedRetries)
+      throws InterruptedException {
+    Duration totalTime = Duration.ZERO;
+
+    int iterations = 0;
     // While the total wait time is less than the duration and there are retries left
-    while (totalTime <= duration && retry.canRetry()) {
-      totalTime += retry.getCurrentWait();
-      if (totalTime <= duration) {
+    while (retry.canRetry() && (totalTime.compareTo(duration) <= 0)) {
+      iterations++;
+      totalTime = totalTime.plus(retry.getCurrentWait());
+      if (totalTime.compareTo(duration) <= 0) {
         retry.useRetry();
-        expectedRetries++;
         if (retry.canRetry()) {
-          try {
-            retry.waitForNextAttempt(log, "Iteration " + expectedRetries);
-          } catch (IllegalArgumentException | InterruptedException e) {
-            log.error("Failed on iteration: {}", expectedRetries, e);
-            throw e;
-          }
+          log.info("Iteration {} - Total time: {}ms - Current wait: {}ms", iterations,
+              totalTime.toMillis(), retry.getCurrentWait().toMillis());
+          retry.waitForNextAttempt(log, "testRetriesForDuration");
         }
       }
     }
 
-    assertEquals(expectedRetries, retry.retriesCompleted());
+    assertEquals(expectedRetries, retry.retriesCompleted(),
+        () -> getErrorMessage(expectedRetries, retry));
+  }
+
+  static String getErrorMessage(long expectedRetries, Retry retry) {
+    return String.format(
+        "Expected %d retries, but only completed %d retries. Retry parameters: maxRetries=%dms, startWait=%sms, maxWait=%sms, waitIncrement=%sms, backOffFactor=%f, logInterval=%sms",
+        expectedRetries, retry.retriesCompleted(), retry.getMaxRetries(),
+        retry.getCurrentWait().toMillis(), retry.getMaxWait().toMillis(),
+        retry.getWaitIncrement().toMillis(), retry.getWaitFactor(),
+        retry.getLogInterval().toMillis());
   }
 
 }

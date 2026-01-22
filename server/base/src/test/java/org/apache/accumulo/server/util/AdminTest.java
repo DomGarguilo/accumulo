@@ -18,16 +18,23 @@
  */
 package org.apache.accumulo.server.util;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.accumulo.core.Constants;
 import org.apache.accumulo.core.clientImpl.ClientContext;
 import org.apache.accumulo.core.data.InstanceId;
 import org.apache.accumulo.core.fate.zookeeper.ZooCache;
 import org.apache.accumulo.core.fate.zookeeper.ZooCache.ZcStat;
+import org.apache.accumulo.core.fate.zookeeper.ZooReaderWriter;
+import org.apache.accumulo.core.fate.zookeeper.ZooUtil.NodeMissingPolicy;
 import org.easymock.EasyMock;
 import org.junit.jupiter.api.Test;
 
@@ -91,6 +98,95 @@ public class AdminTest {
     assertEquals(server, Admin.qualifyWithZooKeeperSessionId(root, zc, server));
 
     EasyMock.verify(zc);
+  }
+
+  /**
+   * SServer group filter should use lock data (UUID,group).
+   */
+  @Test
+  public void testSserverGroupFilterUsesLockData() throws Exception {
+    ZooReaderWriter zoo = EasyMock.createNiceMock(ZooReaderWriter.class);
+
+    String basePath = "/accumulo/iid/sservers";
+    String hostDefault = "host1:10000";
+    String hostOther = "host2:10001";
+
+    EasyMock.expect(zoo.exists(basePath)).andReturn(true);
+    EasyMock.expect(zoo.getChildren(basePath)).andReturn(List.of(hostDefault, hostOther));
+
+    AtomicBoolean deletedDefault = new AtomicBoolean(false);
+    AtomicBoolean deletedOther = new AtomicBoolean(false);
+
+    zoo.recursiveDelete(basePath + "/" + hostDefault, NodeMissingPolicy.SKIP);
+    EasyMock.expectLastCall().andStubAnswer(() -> {
+      deletedDefault.set(true);
+      return null;
+    });
+
+    zoo.recursiveDelete(basePath + "/" + hostOther, NodeMissingPolicy.SKIP);
+    EasyMock.expectLastCall().andStubAnswer(() -> {
+      deletedOther.set(true);
+      return null;
+    });
+
+    EasyMock.replay(zoo);
+
+    ZooZap.Opts opts = new ZooZap.Opts();
+    ZooZap.removeGroupedLocks(zoo, basePath, "default"::equals, hp -> true, opts);
+    assertAll(() -> {
+      assertTrue(deletedDefault.get(),
+          "Expected scan server lock for group 'default' to be deleted, but it was not.");
+      assertFalse(deletedOther.get(),
+          "Expected scan server lock for group 'rg1' to be preserved, but it was deleted.");
+    });
+  }
+
+  /**
+   * SServer cleanup without group filter should delete all host nodes.
+   */
+  @Test
+  public void testSserverDeleteAllNoGroupFilter() throws Exception {
+    ZooReaderWriter zoo = EasyMock.createNiceMock(ZooReaderWriter.class);
+
+    String basePath = "/accumulo/iid/sservers";
+    String host1 = "host1:10000";
+    String host2 = "host2:10001";
+    String lock1 = "zlock#" + UUID.randomUUID() + "#0000000000";
+    String lock2 = "zlock#" + UUID.randomUUID() + "#0000000000";
+
+    EasyMock.expect(zoo.exists(basePath)).andReturn(true);
+    EasyMock.expect(zoo.getChildren(basePath)).andReturn(List.of(host1, host2));
+
+    EasyMock.expect(zoo.exists(basePath + "/" + host1)).andReturn(true);
+    EasyMock.expect(zoo.getChildren(basePath + "/" + host1)).andReturn(List.of(lock1));
+    AtomicBoolean deletedHost1 = new AtomicBoolean(false);
+    AtomicBoolean deletedHost2 = new AtomicBoolean(false);
+
+    zoo.recursiveDelete(basePath + "/" + host1, NodeMissingPolicy.SKIP);
+    EasyMock.expectLastCall().andStubAnswer(() -> {
+      deletedHost1.set(true);
+      return null;
+    });
+
+    EasyMock.expect(zoo.exists(basePath + "/" + host2)).andReturn(true);
+    EasyMock.expect(zoo.getChildren(basePath + "/" + host2)).andReturn(List.of(lock2));
+    zoo.recursiveDelete(basePath + "/" + host2, NodeMissingPolicy.SKIP);
+    EasyMock.expectLastCall().andStubAnswer(() -> {
+      deletedHost2.set(true);
+      return null;
+    });
+
+    EasyMock.replay(zoo);
+
+    ZooZap.Opts opts = new ZooZap.Opts();
+    ZooZap.removeGroupedLocks(zoo, basePath, g -> true, hp -> true, opts);
+
+    assertAll(() -> {
+      assertTrue(deletedHost1.get(),
+          "Expected scan server lock for host1 to be deleted when no group filter is set.");
+      assertTrue(deletedHost2.get(),
+          "Expected scan server lock for host2 to be deleted when no group filter is set.");
+    });
   }
 
 }
